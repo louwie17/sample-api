@@ -22,13 +22,13 @@ use actix::prelude::*;
 use actix_web::http::{Method};
 use actix_web::{
     http, middleware, server, App, AsyncResponder, FutureResponse, HttpResponse, 
-    State
+    State, HttpRequest, fs
 };
 
 use futures::Future;
 
 mod db;
-use db::{DbExecutor, Queries, Pool }; 
+use db::{DbExecutor, Queries, Pool, SampleQuery}; 
 
 struct AppState {
     db: Addr<Syn, DbExecutor>
@@ -38,6 +38,23 @@ struct AppState {
 fn get_samples(state: State<AppState>) -> FutureResponse<HttpResponse> {
     println!("samples request");
     state.db.send(Queries::GetAllSamples).from_err()
+    .and_then(|res| match res {
+        Ok(samples) => Ok(HttpResponse::Ok().json(samples)),
+        Err(_) => Ok(HttpResponse::InternalServerError().into())
+    })
+    .responder()
+}
+
+/// Version 1: Calls 4 queries in sequential order, as an asynchronous handler
+fn query_samples(req: HttpRequest<AppState>) -> FutureResponse<HttpResponse> {
+    println!("samples request");
+    println!("Query string: ${:?}", req.query_string());
+    // let limit = req.match_info().query("limit").unwrap();
+    // println!("${:?}", limit);
+
+    req.state().db.send(SampleQuery{
+        query_string: req.query_string().to_string()
+    }).from_err()
     .and_then(|res| match res {
         Ok(samples) => Ok(HttpResponse::Ok().json(samples)),
         Err(_) => Ok(HttpResponse::InternalServerError().into())
@@ -60,6 +77,7 @@ fn main() {
     let pool = Pool::new(manager).unwrap();
 
 
+    let static_page_folder = env::var("STATIC_PAGE_FOLDER").expect("STATIC_PAGE_FOLDER must be set");
     let addr = SyncArbiter::start(3, move || DbExecutor(pool.clone()));
 
     server::new(move || {
@@ -73,11 +91,15 @@ fn main() {
                     _ => HttpResponse::NotFound(),
                 }
             }))
+            .resource("/query_samples", |r| r.method(http::Method::GET).f(query_samples))
             .resource("/samples", |r| r.method(http::Method::GET).with(get_samples))
-    }).bind("127.0.0.1:8080")
+            .handler(
+                "/",
+                fs::StaticFiles::new(&static_page_folder).index_file("index.html"))
+    }).bind("0.0.0.0:4200")
         .unwrap()
         .start();
 
-    println!("Started http server: 127.0.0.1:8080");
+    println!("Started http server: 0.0.0.0:4200");
     let _ = sys.run();
 }
